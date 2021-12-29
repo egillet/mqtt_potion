@@ -98,7 +98,7 @@ defmodule MqttPotion.Connection do
 
     ssl_opts =
       opts
-      |> Keyword.get(:ssl_opts, {})
+      |> Keyword.get(:ssl_opts, [])
       |> Keyword.put_new(:server_name_indication, String.to_charlist(opts[:host]))
 
     opts = Keyword.put(opts, :ssl_opts, ssl_opts)
