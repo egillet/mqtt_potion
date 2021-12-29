@@ -60,7 +60,7 @@ You probably just want to add this to your application's supervision tree.
 ### Using the client
 
 ```elixir
-:ok = MqttPotion.publish(name, message, topic, opts)
+:ok = MqttPotion.publish(name, topic, message, opts)
 
 :ok = MqttPotion.subscribe({name, qos})
 
