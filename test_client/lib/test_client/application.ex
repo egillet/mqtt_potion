@@ -29,7 +29,7 @@ defmodule TestClient.Application do
         verify: :verify_peer,
         cacertfile: mqtt_ca_cert_file
       ],
-      handler: TestClient.MQTTHandler,
+      handler_pid: self,
       subscriptions: [
         {"test/1", 0}
       ]

@@ -19,7 +19,7 @@ defmodule MqttPotion.Connection do
             conn_pid: pid(),
             username: String.t(),
             client_id: String.t(),
-            handler: module(),
+            handler_pid: pid(),
             opts: MqttPotion.opts(),
             reconnect: {delay :: non_neg_integer, max_delay :: non_neg_integer},
             subscriptions: [MqttPotion.subscription()]
@@ -28,7 +28,7 @@ defmodule MqttPotion.Connection do
       :conn_pid,
       :username,
       :client_id,
-      :handler,
+      :handler_pid,
       :opts,
       :reconnect,
       :subscriptions
@@ -37,7 +37,7 @@ defmodule MqttPotion.Connection do
 
   @opt_keys [
     :owner,
-    :handler,
+    :handler_pid,
     :host,
     :hosts,
     :port,
@@ -94,7 +94,7 @@ defmodule MqttPotion.Connection do
     {start_when, opts} = Keyword.pop(opts, :start_when, :now)
     {subscriptions, opts} = Keyword.pop(opts, :subscriptions, [])
 
-    handler = opts[:handler]
+    handler_pid = opts[:handler_pid]
 
     ssl_opts =
       opts
@@ -105,9 +105,9 @@ defmodule MqttPotion.Connection do
 
     # EMQTT `msg_handler` functions
     handler_functions = %{
-      puback: &handle_puback(&1, handler),
-      publish: &handle_publish(&1, handler),
-      disconnected: &handle_disconnect(&1, handler)
+      puback: &handle_puback(&1, handler_pid),
+      publish: &handle_publish(&1, handler_pid),
+      disconnected: &handle_disconnect(&1, handler_pid)
     }
 
     state = %State{
@@ -115,7 +115,7 @@ defmodule MqttPotion.Connection do
       reconnect: {delay, max_delay},
       subscriptions: subscriptions,
       username: opts[:username],
-      handler: handler,
+      handler_pid: handler_pid,
       opts: [{:msg_handler, handler_functions} | opts]
     }
 
@@ -176,21 +176,21 @@ defmodule MqttPotion.Connection do
   end
 
   def handle_call({:subscribe, subscription}, _from, state) do
-    case sub_check(state, subscription) do
-      {:ok, state} ->
+    case sub(state, subscription) do
+      :ok ->
         {:reply, :ok, state}
 
-      {:error, state, _} = error ->
+      {:error, _} = error ->
         {:reply, error, state}
     end
   end
 
   def handle_call({:unsubscribe, topic}, _from, state) do
-    case unsub_check(state, topic) do
-      {:ok, state} ->
+    case unsub(state, topic) do
+      :ok ->
         {:reply, :ok, state}
 
-      {:error, state, _} = error ->
+      {:error, _} = error ->
         {:reply, error, state}
     end
   end
@@ -212,22 +212,22 @@ defmodule MqttPotion.Connection do
   end
 
   def handle_cast({:subscribe, subscription}, state) do
-    case sub_check(state, subscription) do
-      {:ok, state} ->
+    case sub(state, subscription) do
+      :ok ->
         {:noreply, state}
 
-      {:error, state, _} = error ->
+      {:error, _} = error ->
         log_error(error, "subscribe error")
         {:noreply, state}
     end
   end
 
   def handle_cast({:unsubscribe, topic}, state) do
-    case unsub_check(state, topic) do
-      {:ok, state} ->
+    case unsub(state, topic) do
+      :ok ->
         {:noreply, state}
 
-      {:error, state, _} = error ->
+      {:error, _} = error ->
         log_error(error, "unsubscribe error")
         {:noreply, state}
     end
@@ -241,18 +241,6 @@ defmodule MqttPotion.Connection do
   ## Info
 
   @impl GenServer
-
-  def handle_info({:publish, packet}, state) do
-    %{payload: payload, topic: topic} = packet
-
-    Logger.debug("[MqttPotion] Message received for #{topic}")
-
-    if msg_handler = state.handlers[:message] do
-      :ok = msg_handler.(String.split(topic, "/"), payload)
-    end
-
-    {:noreply, state}
-  end
 
   def handle_info({:reconnect, attempt}, %{reconnect: {initial_delay, max_delay}} = state) do
     Logger.debug("[MqttPotion] Trying to reconnect")
@@ -289,15 +277,12 @@ defmodule MqttPotion.Connection do
 
   ## Disconnect
 
-  def handle_disconnect({reason_code, properties}, handler) do
+  def handle_disconnect({reason_code, properties}, handler_pid) do
     Logger.warn(
       "[MqttPotion] Disconnect received: reason #{inspect(reason_code)}, properties: #{inspect(properties)}"
     )
 
-    if handler != nil do
-      :ok = handler.handle_disconnect(reason_code, properties)
-    end
-
+    GenServer.cast(handler_pid, {:mqtt, :disconnect, reason_code, properties})
     :ok
   rescue
     e ->
@@ -307,12 +292,9 @@ defmodule MqttPotion.Connection do
 
   ## PubAck
 
-  def handle_puback(ack, handler) do
+  def handle_puback(ack, handler_pid) do
     Logger.debug("[MqttPotion] PUBACK received #{inspect(ack)}")
-
-    if handler != nil do
-      :ok = handler.handle_puback(ack)
-    end
+    GenServer.cast(handler_pid, {:mqtt, :puback})
 
     :ok
   rescue
@@ -323,15 +305,11 @@ defmodule MqttPotion.Connection do
 
   ## Publish
 
-  def handle_publish(message, handler) do
+  def handle_publish(message, handler_pid) do
     Logger.debug("[MqttPotion] Publish: #{inspect(message)}")
-    topic = String.split(message.topic, "/")
 
     message = struct(Message, message)
-
-    if handler != nil do
-      :ok = handler.handle_message(topic, message)
-    end
+    GenServer.cast(handler_pid, {:mqtt, :publish, message.topic, message.payload})
 
     :ok
   rescue
@@ -367,12 +345,14 @@ defmodule MqttPotion.Connection do
       Logger.info("[MqttPotion] Connected #{inspect(conn_pid)}")
       state = %State{state | conn_pid: conn_pid}
 
-      sub_list(state, state.subscriptions)
-      |> log_error("subscribe error")
+      Enum.each(state.subscriptions, fn subscription ->
+        case sub(state, subscription) do
+          :ok -> :ok
+          {:error, _reason} = error -> log_error(error, "subscribe error")
+        end
+      end)
 
-      if state.handler != nil do
-        :ok = state.handler.handle_connect()
-      end
+      GenServer.cast(state.handler_pid, {:mqtt, :connect})
 
       {:ok, state}
     else
@@ -391,61 +371,6 @@ defmodule MqttPotion.Connection do
     end
   catch
     :exit, value -> {:error, "The emqtt #{inspect(state.conn_pid)} is dead: #{inspect(value)}"}
-  end
-
-  @spec sub_list(state :: State.t(), subscriptions :: [subscription()]) ::
-          :ok | {:error, String.t()}
-  defp sub_list(%State{}, []) do
-    :ok
-  end
-
-  defp sub_list(%State{} = state, [head | tail]) do
-    case sub(state, head) do
-      :ok -> sub_list(state, tail)
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  @spec sub_check(state :: State.t(), subscription :: subscription()) ::
-          {:ok, State.t()} | {:error, State.t(), String.t()}
-  defp sub_check(%State{} = state, {topic, _} = subscription) do
-    old_subscription =
-      state.subscriptions
-      |> Enum.filter(fn {this_topic, _} -> topic == this_topic end)
-      |> List.first()
-
-    subscriptions = [subscription | state.subscriptions]
-    state = %State{state | subscriptions: subscriptions}
-
-    if old_subscription == nil do
-      case sub(state, subscription) do
-        :ok ->
-          {:ok, state}
-
-        {:error, reason} ->
-          {:error, state, reason}
-      end
-    else
-      {:ok, state}
-    end
-  end
-
-  @spec unsub_check(state :: State.t(), topic :: String.t()) ::
-          {:ok, State.t()} | {:error, State.t(), String.t()}
-  defp unsub_check(%State{} = state, topic) do
-    subscriptions =
-      state.subscriptions
-      |> Enum.reject(fn {this_topic, _} -> topic == this_topic end)
-
-    state = %State{state | subscriptions: subscriptions}
-
-    case unsub(state, topic) do
-      :ok ->
-        {:ok, state}
-
-      {:error, reason} ->
-        {:error, state, reason}
-    end
   end
 
   @spec sub(state :: State.t(), subscription :: subscription()) :: :ok | {:error, String.t()}

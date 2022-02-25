@@ -84,7 +84,7 @@ The sync methods will return errors as `{:error, reason :: String.t()}`.
 ```elixir
 {:name, atom}
 {:owner, pid}
-{:handler, module}
+{:handler_pid, pid}
 {:host, binary}
 {:hosts, [{binary, :inet.port_number()}]}
 {:port, :inet.port_number()}

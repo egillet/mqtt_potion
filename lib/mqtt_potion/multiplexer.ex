@@ -47,7 +47,7 @@ defmodule MqttPotion.Multiplexer do
 
   @spec message(topic_str :: String.t(), message :: String.t()) :: :ok
   def message(topic_str, message) do
-    GenServer.cast(__MODULE__, {:message, topic_str, message})
+    GenServer.cast(__MODULE__, {:mqtt, :publish, topic_str, message})
   end
 
   ## private
@@ -164,9 +164,28 @@ defmodule MqttPotion.Multiplexer do
     {:noreply, new_state}
   end
 
-  def handle_cast({:message, topic_str, message}, state) do
+  def handle_cast({:mqtt, :connect}, state) do
+    Logger.info("Got connected.")
+    client_name = state.mqtt_potion
+
+    state.subscriptions
+    |> Enum.each(fn {topic, _} ->
+      topic_str = Enum.join(topic, "/")
+      subscription = {topic_str, qos: 0, nl: true, rh: 0}
+      MqttPotion.subscribe(client_name, subscription)
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:mqtt, :disconnect, reason_code, properties}, state) do
+    Logger.info("Got disconnected #{inspect(reason_code)} #{inspect(properties)}.")
+    {:noreply, state}
+  end
+
+  def handle_cast({:mqtt, :publish, topic_str, message}, state) do
     topic = String.split(topic_str, "/")
-    Logger.info("Got message #{topic_str} #{inspect(message)}.")
+    Logger.info("Got message #{topic_str}.")
 
     last_message = Map.put(state.last_message, topic, message)
     state = %State{state | last_message: last_message}
@@ -176,6 +195,11 @@ defmodule MqttPotion.Multiplexer do
       :ok = send_to_client(topic, label, pid, format, message)
     end)
 
+    {:noreply, state}
+  end
+
+  def handle_cast(msg, state) do
+    Logger.info("Got unknown cast msg #{inspect(msg)}.")
     {:noreply, state}
   end
 
