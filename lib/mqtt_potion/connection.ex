@@ -281,12 +281,15 @@ defmodule MqttPotion.Connection do
   end
 
   def handle_info({:EXIT, pid, _}, state) do
-    if pid == state.conn_pid do
-      Logger.warn("[MqttPotion] Got Exit")
-      Process.send_after(self(), {:reconnect, 0}, 0)
-    end
+    state =
+      if pid == state.conn_pid do
+        Logger.warn("[MqttPotion] Got Exit")
+        Process.send_after(self(), {:reconnect, 0}, 0)
+        %{state | conn_pid: nil}
+      else
+        state
+      end
 
-    state = %{state | conn_pid: nil}
     {:noreply, state}
   end
 
