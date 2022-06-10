@@ -15,6 +15,7 @@ defmodule MqttPotion.Connection do
 
   defmodule State do
     @moduledoc false
+    @type pub_opts :: MqttPotion.pub_opts()
     @type t :: %__MODULE__{
             conn_pid: pid(),
             username: String.t(),
@@ -22,7 +23,8 @@ defmodule MqttPotion.Connection do
             handler_pid: pid(),
             opts: MqttPotion.opts(),
             reconnect: {delay :: non_neg_integer, max_delay :: non_neg_integer},
-            subscriptions: [MqttPotion.subscription()]
+            subscriptions: [MqttPotion.subscription()],
+            outgoing: [{topic :: String.t(), message :: String.t(), opts :: pub_opts()}]
           }
     defstruct [
       :conn_pid,
@@ -31,7 +33,8 @@ defmodule MqttPotion.Connection do
       :handler_pid,
       :opts,
       :reconnect,
-      :subscriptions
+      :subscriptions,
+      :outgoing
     ]
   end
 
@@ -116,7 +119,8 @@ defmodule MqttPotion.Connection do
       subscriptions: subscriptions,
       username: opts[:username],
       handler_pid: handler_pid,
-      opts: [{:msg_handler, handler_functions} | opts]
+      opts: [{:msg_handler, handler_functions} | opts],
+      outgoing: []
     }
 
     {:ok, state, {:continue, {:start_when, start_when}}}
@@ -171,12 +175,20 @@ defmodule MqttPotion.Connection do
   @impl GenServer
 
   def handle_call({:publish, topic, message, opts}, _from, state) do
-    result = pub(state, topic, message, opts)
-    {:reply, result, state}
+    case pub_or_queue(state, topic, message, opts) do
+      :ok ->
+        {:reply, :ok, state}
+
+      {:queued, state} ->
+        {:reply, :ok, state}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
   end
 
   def handle_call({:subscribe, subscription}, _from, state) do
-    case sub(state, subscription) do
+    case sub_or_nop(state, subscription) do
       :ok ->
         {:reply, :ok, state}
 
@@ -186,7 +198,7 @@ defmodule MqttPotion.Connection do
   end
 
   def handle_call({:unsubscribe, topic}, _from, state) do
-    case unsub(state, topic) do
+    case unsub_or_nop(state, topic) do
       :ok ->
         {:reply, :ok, state}
 
@@ -205,14 +217,21 @@ defmodule MqttPotion.Connection do
   @impl GenServer
 
   def handle_cast({:publish, topic, message, opts}, state) do
-    pub(state, topic, message, opts)
-    |> log_error("publish error")
+    case pub_or_queue(state, topic, message, opts) do
+      :ok ->
+        {:noreply, state}
 
-    {:noreply, state}
+      {:queued, state} ->
+        {:noreply, state}
+
+      {:error, _} = error ->
+        log_error(error, "publish error")
+        {:noreply, state}
+    end
   end
 
   def handle_cast({:subscribe, subscription}, state) do
-    case sub(state, subscription) do
+    case sub_or_nop(state, subscription) do
       :ok ->
         {:noreply, state}
 
@@ -223,7 +242,7 @@ defmodule MqttPotion.Connection do
   end
 
   def handle_cast({:unsubscribe, topic}, state) do
-    case unsub(state, topic) do
+    case unsub_or_nop(state, topic) do
       :ok ->
         {:noreply, state}
 
@@ -267,6 +286,7 @@ defmodule MqttPotion.Connection do
       Process.send_after(self(), {:reconnect, 0}, 0)
     end
 
+    state = %{state | conn_pid: nil}
     {:noreply, state}
   end
 
@@ -345,6 +365,8 @@ defmodule MqttPotion.Connection do
       Logger.info("[MqttPotion] Connected #{inspect(conn_pid)}")
       state = %State{state | conn_pid: conn_pid}
 
+      state = process_outgoing_queue(state)
+
       Enum.each(state.subscriptions, fn subscription ->
         case sub(state, subscription) do
           :ok -> :ok
@@ -373,6 +395,39 @@ defmodule MqttPotion.Connection do
     :exit, value -> {:error, "The emqtt #{inspect(state.conn_pid)} is dead: #{inspect(value)}"}
   end
 
+  @spec pub_or_queue(
+          state :: State.t(),
+          topic :: String.t(),
+          message :: String.t(),
+          opts :: pub_opts()
+        ) ::
+          :ok | {:queued, State.t()} | {:error, String.t()}
+  defp pub_or_queue(%State{} = state, topic, message, opts) do
+    if state.conn_pid == nil do
+      Logger.info("[MqttPotion] Queuing outgoing message #{topic}")
+      queue = state.outgoing
+      head = {topic, message, opts}
+      state = %{state | outgoing: [head | queue]}
+      {:queued, state}
+    else
+      pub(state, topic, message, opts)
+    end
+  end
+
+  @spec process_outgoing_queue(state :: State.t()) :: State.t()
+  defp process_outgoing_queue(state) do
+    queue = state.outgoing |> Enum.reverse()
+
+    Enum.each(queue, fn {topic, message, opts} ->
+      Logger.info("[MqttPotion] Publishing queued message #{topic}")
+
+      pub(state, topic, message, opts)
+      |> log_error("publish queue error")
+    end)
+
+    %{state | outgoing: []}
+  end
+
   @spec sub(state :: State.t(), subscription :: subscription()) :: :ok | {:error, String.t()}
   defp sub(%State{} = state, {topic, opts}) do
     case :emqtt.subscribe(state.conn_pid, topic, opts) do
@@ -388,6 +443,17 @@ defmodule MqttPotion.Connection do
     :exit, value -> {:error, "The emqtt #{inspect(state.conn_pid)} is dead: #{inspect(value)}"}
   end
 
+  @spec sub_or_nop(state :: State.t(), subscription :: subscription()) ::
+          :ok | {:error, String.t()}
+  defp sub_or_nop(%State{} = state, {topic, opts}) do
+    if state.conn_pid == nil do
+      Logger.info("[MqttPotion] Skipping subscription to #{topic} @ opts #{inspect(opts)}")
+      :ok
+    else
+      sub(state, {topic, opts})
+    end
+  end
+
   @spec unsub(state :: State.t(), topic :: String.t()) :: :ok | {:error, String.t()}
   defp unsub(%State{} = state, topic) do
     case :emqtt.unsubscribe(state.conn_pid, topic) do
@@ -401,6 +467,16 @@ defmodule MqttPotion.Connection do
     end
   catch
     :exit, value -> {:error, "The emqtt #{inspect(state.conn_pid)} is dead: #{inspect(value)}"}
+  end
+
+  @spec unsub_or_nop(state :: State.t(), topic :: String.t()) :: :ok | {:error, String.t()}
+  defp unsub_or_nop(%State{} = state, topic) do
+    if state.conn_pid == nil do
+      Logger.info("[MqttPotion] Skipping unsubscribe from #{topic}")
+      :ok
+    else
+      unsub(state, topic)
+    end
   end
 
   defp dc(%State{} = state) do
