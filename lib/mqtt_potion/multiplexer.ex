@@ -28,6 +28,7 @@ defmodule MqttPotion.Multiplexer do
     GenServer.start_link(__MODULE__, opts, [{:name, __MODULE__} | opts])
   end
 
+  @deprecated "Use subscribe_str instead"
   @spec subscribe(
           topic :: State.topic_t(),
           label :: atom(),
@@ -36,6 +37,18 @@ defmodule MqttPotion.Multiplexer do
           resend :: :resend | :no_resend
         ) :: :ok
   def subscribe(topic, label, pid, format, resend) do
+    GenServer.cast(__MODULE__, {:subscribe, topic, label, pid, format, resend})
+  end
+
+  @spec subscribe_str(
+          topic :: String.t(),
+          label :: atom(),
+          pid :: pid,
+          format :: :json | :raw,
+          resend :: :resend | :no_resend
+        ) :: :ok
+  def subscribe_str(topic_str, label, pid, format, resend) do
+    topic = String.split(topic_str, "/")
     GenServer.cast(__MODULE__, {:subscribe, topic, label, pid, format, resend})
   end
 
