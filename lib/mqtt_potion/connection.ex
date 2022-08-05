@@ -393,6 +393,7 @@ defmodule MqttPotion.Connection do
       :ok = :emqtt.publish(state.conn_pid, topic, message, opts)
     else
       {:ok, _packet_id} = :emqtt.publish(state.conn_pid, topic, message, opts)
+      :ok
     end
   catch
     :exit, value -> {:error, "The emqtt #{inspect(state.conn_pid)} is dead: #{inspect(value)}"}
