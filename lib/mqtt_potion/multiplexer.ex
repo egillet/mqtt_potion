@@ -137,7 +137,7 @@ defmodule MqttPotion.Multiplexer do
     pids =
       case Map.get(state.subscriptions, topic, nil) do
         nil ->
-          subscription = {topic_str, qos: 0, nl: true, rh: 0}
+          subscription = {topic_str, qos: 2, nl: true, rh: 0}
           client_name = state.mqtt_potion
 
           # Logger.info("- Unsubscribing to #{topic} pid #{inspect(pid)}.")
@@ -184,7 +184,7 @@ defmodule MqttPotion.Multiplexer do
     state.subscriptions
     |> Enum.each(fn {topic, _} ->
       topic_str = Enum.join(topic, "/")
-      subscription = {topic_str, qos: 0, nl: true, rh: 0}
+      subscription = {topic_str, qos: 2, nl: true, rh: 0}
       MqttPotion.subscribe(client_name, subscription)
     end)
 
