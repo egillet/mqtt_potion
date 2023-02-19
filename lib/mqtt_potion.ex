@@ -47,7 +47,7 @@ defmodule MqttPotion do
 
   defmodule Message do
     @moduledoc """
-    Defines an incomming message
+    Defines an incoming message
     """
 
     @type t :: %__MODULE__{
