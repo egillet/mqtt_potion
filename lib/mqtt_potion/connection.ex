@@ -165,7 +165,7 @@ defmodule MqttPotion.Connection do
         else
           # ... else let clients see errors.
           Process.send_after(self(), {:reconnect, attempt + 1}, delay)
-          {:noreply, state, {:continue}}
+          {:noreply, state}
         end
     end
   end
