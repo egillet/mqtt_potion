@@ -7,6 +7,6 @@ on:
 jobs:
   test:
     name: Setup, Build, Test
-    uses: brianmay/workflows/.github/workflows/elixir.yaml@b8ac8e58821a896616de972c4e8602c3e17a6a46
+    uses: brianmay/workflows/.github/workflows/elixir.yaml@main
     with:
       build_npm_assets: false
